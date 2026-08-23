@@ -1,0 +1,413 @@
+// ============================================================================
+// Namibia Property Platform — Prisma schema
+//
+// SECURITY NOTE (see SECURITY.md and the MVP spec, Section 2 & 5):
+// `OwnerRecord` holds owner ID numbers and personal contact details. The
+// spec flags sourcing/storing this as HIGH RISK given Namibia currently has
+// no Data Protection Act in force. Do not connect this table to a real data
+// import until you have legal sign-off — see SECURITY.md. The seed script
+// only ever inserts clearly fictitious data.
+//
+// The spec's Section 5 recommends the public listings data and the owner
+// PII live in genuinely separate databases/hosting environments. This
+// schema approximates that inside one Postgres instance for MVP speed --
+// `Property` and `OwnerRecord` are linked only by an opaque `ownerRefId`
+// (never a real foreign key), row-level security restricts `OwnerRecord` to
+// the `verified_professional` / `admin` roles, and every read is written to
+// `OwnerAccessAuditLog`. Before a real launch with real owner data, promote
+// `OwnerRecord` to an actually separate database per the spec.
+// ============================================================================
+
+// Rust-free client (Prisma 7): the query planner ships as a WASM npm
+// package instead of a platform-specific binary, and the app talks to
+// Postgres directly via @prisma/adapter-pg (see src/lib/prisma.ts). This
+// also avoids the classic "serverless cold start downloads a 20MB engine
+// binary" problem on Vercel.
+generator client {
+  provider   = "prisma-client"
+  output     = "../src/generated/prisma"
+  engineType = "client"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  LANDLORD
+  TENANT
+  VERIFIED_PROFESSIONAL // agents/attorneys — the only role that can ever resolve owner PII
+  ADMIN
+}
+
+/// Mirrors a Supabase `auth.users` row (id matches auth.users.id). Holds the
+/// app-specific profile fields Supabase Auth doesn't.
+model Profile {
+  id          String   @id @default(uuid()) // matches supabase auth.users.id
+  role        UserRole
+  fullName    String
+  phone       String?
+  email       String   @unique
+  createdAt   DateTime @default(now())
+
+  propertiesOwned   Property[]          @relation("LandlordProperties")
+  tenancies         Tenancy[]           @relation("TenantTenancies")
+  maintenanceNotes  MaintenanceNote[]
+  sentMessages      Message[]
+  notifications     Notification[]
+  leaseSignatures   LeaseSignature[]
+  ownerAccessLogs   OwnerAccessAuditLog[] @relation("AccessRequester")
+  crimeOverridesSet CrimeTierOverride[]
+
+  @@map("profiles")
+}
+
+// ---------------------------------------------------------------------------
+// Properties, units, and public listing data (Buy/Sell module)
+// ---------------------------------------------------------------------------
+
+enum ListingType {
+  FOR_SALE
+  FOR_RENT
+  MANAGED_RENTAL // not publicly listed — a landlord's rental managed via the Tenant/Landlord module
+}
+
+enum Town {
+  WINDHOEK
+  SWAKOPMUND
+  WALVIS_BAY
+}
+
+/// Public listing data. Nothing on this model is personally identifying
+/// beyond an optional opted-in landlord contact — see OwnerRecord for the
+/// restricted PII table.
+model Property {
+  id            String      @id @default(uuid())
+  listingType   ListingType
+  town          Town
+  suburb        String
+  addressLine   String
+  description   String
+  propertyType  String // house | apartment | land | commercial
+  bedrooms      Int?
+  bathrooms     Int?
+  sizeSqm       Int?
+  askingPrice   Int? // N$, null if not for sale (e.g. purely a managed rental)
+  images        String[]    @default([])
+
+  // Buy/Sell intelligence fields — Section 2 of the spec (AMBER: needs the
+  // deeds-data source confirmed before this is populated with real data).
+  lastSoldPrice Int?
+  lastSoldDate  DateTime?
+
+  // Opaque link to OwnerRecord. NOT a Prisma relation on purpose — resolving
+  // it always goes through lib/data-providers/ownerAccess.ts, which enforces
+  // the role check + audit log. See the file header note above.
+  ownerRefId    String?     @unique
+
+  landlordId    String?
+  landlord      Profile?    @relation("LandlordProperties", fields: [landlordId], references: [id])
+
+  units         Unit[]
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([town, suburb])
+  @@index([listingType])
+  @@map("properties")
+}
+
+/// A rentable unit within a property (supports both a single-unit house and
+/// a multi-unit apartment block under one Property).
+model Unit {
+  id          String    @id @default(uuid())
+  propertyId  String
+  property    Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  unitLabel   String // e.g. "Unit 3B" or "Main house"
+  bedrooms    Int?
+  bathrooms   Int?
+  rentAmount  Int // N$ per month
+
+  tenancies       Tenancy[]
+  maintenanceReqs MaintenanceRequest[]
+
+  createdAt DateTime @default(now())
+
+  @@map("units")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancies, leases, e-signatures (Tenant/Landlord module)
+// ---------------------------------------------------------------------------
+
+enum TenancyStatus {
+  PENDING
+  ACTIVE
+  ENDED
+}
+
+model Tenancy {
+  id            String        @id @default(uuid())
+  unitId        String
+  unit          Unit          @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  tenantId      String
+  tenant        Profile       @relation("TenantTenancies", fields: [tenantId], references: [id])
+  startDate     DateTime
+  endDate       DateTime
+  rentAmount    Int
+  depositAmount Int
+  status        TenancyStatus @default(PENDING)
+
+  lease            Lease?
+  maintenanceReqs  MaintenanceRequest[]
+  messages         Message[]
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@map("tenancies")
+}
+
+enum LeaseStatus {
+  DRAFT
+  SENT_FOR_SIGNATURE
+  SIGNED
+  VOID
+}
+
+/// Template-based lease, never freely-generated by an LLM — see spec
+/// Section 4.2. `fields` stores the editable-clause values (spec Section
+/// 4.1's 14 clauses) as JSON snapshotted at generation time so a later edit
+/// to the master template doesn't retroactively change a signed lease.
+model Lease {
+  id         String      @id @default(uuid())
+  tenancyId  String      @unique
+  tenancy    Tenancy     @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  status     LeaseStatus @default(DRAFT)
+  fields     Json // the 14-clause field snapshot — see lib/pdf/leaseTemplate.ts
+  pdfPath    String? // Supabase Storage path once generated
+  version    Int         @default(1)
+
+  signatures LeaseSignature[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("leases")
+}
+
+/// Basic electronic signature per spec Section 4.3 — NOT an "advanced"
+/// e-signature (no certified identity verification). Adequate per the
+/// Electronic Transactions Act 4 of 2019 research for standard residential
+/// leases; confirm with counsel before relying on this for high-value or
+/// dispute-prone leases.
+model LeaseSignature {
+  id          String   @id @default(uuid())
+  leaseId     String
+  lease       Lease    @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+  signerId    String
+  signer      Profile  @relation(fields: [signerId], references: [id])
+  typedName   String
+  ipAddress   String
+  userAgent   String
+  consentGiven Boolean @default(false)
+  signedAt    DateTime @default(now())
+
+  @@map("lease_signatures")
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance
+// ---------------------------------------------------------------------------
+
+enum MaintenanceStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+}
+
+enum MaintenanceUrgency {
+  LOW
+  MEDIUM
+  HIGH
+  EMERGENCY
+}
+
+model MaintenanceRequest {
+  id          String              @id @default(uuid())
+  unitId      String
+  unit        Unit                @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  tenancyId   String
+  tenancy     Tenancy             @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  category    String
+  description String
+  photoUrls   String[]            @default([])
+  urgency     MaintenanceUrgency  @default(MEDIUM)
+  status      MaintenanceStatus   @default(NEW)
+
+  notes     MaintenanceNote[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@map("maintenance_requests")
+}
+
+model MaintenanceNote {
+  id                    String              @id @default(uuid())
+  maintenanceRequestId  String
+  maintenanceRequest    MaintenanceRequest  @relation(fields: [maintenanceRequestId], references: [id], onDelete: Cascade)
+  authorId              String
+  author                Profile             @relation(fields: [authorId], references: [id])
+  body                  String
+  createdAt             DateTime            @default(now())
+
+  @@map("maintenance_notes")
+}
+
+// ---------------------------------------------------------------------------
+// Messaging & notifications
+// ---------------------------------------------------------------------------
+
+model Message {
+  id        String   @id @default(uuid())
+  tenancyId String
+  tenancy   Tenancy  @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  senderId  String
+  sender    Profile  @relation(fields: [senderId], references: [id])
+  body      String
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([tenancyId])
+  @@map("messages")
+}
+
+enum NotificationType {
+  RENT_DUE
+  LEASE_RENEWAL
+  MAINTENANCE_UPDATE
+  NEW_MESSAGE
+}
+
+model Notification {
+  id        String            @id @default(uuid())
+  userId    String
+  user      Profile           @relation(fields: [userId], references: [id])
+  type      NotificationType
+  payload   Json
+  sentAt    DateTime?
+  readAt    DateTime?
+  createdAt DateTime          @default(now())
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Owner PII — restricted table (spec Section 2 risk note + Section 5)
+// ---------------------------------------------------------------------------
+
+/// Deliberately NOT given a Prisma relation to Property — see the file
+/// header. `idNumberEnc` / `phoneEnc` / `emailEnc` are AES-256-GCM
+/// ciphertext produced by lib/encryption.ts, never plaintext at rest.
+/// Row-level security (supabase/migrations) restricts this table to the
+/// `verified_professional` and `admin` roles only.
+model OwnerRecord {
+  refId        String   @id @default(uuid())
+  ownerName    String // legal name from the deed — treated as public-record per spec's mitigation path 2
+  idNumberEnc  String?  // ciphertext; null unless you've resolved the Section 2 legal question
+  phoneEnc     String?
+  emailEnc     String?
+  isFictitious Boolean  @default(true) // seed data always sets this true — see SECURITY.md
+  createdAt    DateTime @default(now())
+
+  @@map("owner_records")
+}
+
+/// Every resolution of a Property.ownerRefId -> OwnerRecord must write a row
+/// here. Enforced ONLY in application code (lib/data-providers/ownerAccess.ts)
+/// — Postgres has no SELECT trigger event, so a DB-level backstop for reads
+/// isn't possible the way it is for writes. If you need a guarantee that
+/// survives a bug in that one function, look at Supabase's query logging or
+/// the pgAudit extension rather than assuming a trigger can cover this.
+model OwnerAccessAuditLog {
+  id              String   @id @default(uuid())
+  requestedById   String
+  requestedBy     Profile  @relation("AccessRequester", fields: [requestedById], references: [id])
+  ownerRefId      String
+  propertyId      String
+  reason          String
+  accessedAt      DateTime @default(now())
+
+  @@map("owner_access_audit_log")
+}
+
+// ---------------------------------------------------------------------------
+// Estimator inputs — all backed by pluggable providers with mock data.
+// See lib/data-providers/*/README notes: none of these have a confirmed
+// real data source in Namibia yet per spec Section 2. Do not present these
+// as authoritative until a real provider is wired in.
+// ---------------------------------------------------------------------------
+
+model ComparableSale {
+  id           String   @id @default(uuid())
+  town         Town
+  suburb       String
+  propertyType String
+  bedrooms     Int?
+  price        Int
+  saleDate     DateTime
+  lat          Float
+  lng          Float
+  source       String   @default("seed-mock-data") // never claim this is real deeds data unless it is
+
+  @@index([town, suburb])
+  @@map("comparable_sales")
+}
+
+model School {
+  id     String @id @default(uuid())
+  name   String
+  town   Town
+  suburb String
+  level  String // primary | secondary | combined
+  lat    Float
+  lng    Float
+  source String @default("seed-sample-illustrative") // swap for a real HOTOSM/OSM import before launch
+
+  @@index([town, suburb])
+  @@map("schools")
+}
+
+enum CrimeTier {
+  LOW
+  MEDIUM
+  HIGH
+  UNKNOWN
+}
+
+/// Manual/admin-entered stand-in for the crime-data feature the spec rates
+/// RED (no usable Namibian suburb-level dataset exists). This table exists
+/// so the product can show *something* sourced and dated rather than a
+/// fabricated score — see lib/data-providers/crime/ManualOverrideCrimeProvider.ts.
+model CrimeTierOverride {
+  id        String    @id @default(uuid())
+  town      Town
+  suburb    String
+  tier      CrimeTier @default(UNKNOWN)
+  source    String // e.g. "local police station enquiry, Aug 2026" — always cite something
+  note      String?
+  setById   String
+  setBy     Profile   @relation(fields: [setById], references: [id])
+  setAt     DateTime  @default(now())
+
+  @@unique([town, suburb])
+  @@map("crime_tier_overrides")
+}

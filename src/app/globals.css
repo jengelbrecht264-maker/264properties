@@ -1,0 +1,95 @@
+:root {
+  --navy: #1f3a5f;
+  --gold: #b08d57;
+  --grey: #595959;
+  --light: #f4f5f7;
+  --red: #c0392b;
+  --amber: #b9770e;
+  --green: #1e7e34;
+  --border: #dde1e6;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: #1a1a1a;
+  background: #fff;
+}
+
+a { color: var(--navy); }
+
+.container { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.nav a { text-decoration: none; margin-left: 18px; font-size: 14px; color: var(--navy); }
+.nav .brand { font-weight: 700; font-size: 18px; color: var(--navy); text-decoration: none; margin-left: 0; }
+
+.btn {
+  display: inline-block;
+  padding: 9px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--navy);
+  background: var(--navy);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn.secondary { background: #fff; color: var(--navy); }
+.btn.danger { background: var(--red); border-color: var(--red); }
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 14px;
+  background: #fff;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge.low { background: #e6f4ea; color: var(--green); }
+.badge.medium { background: #fdf1de; color: var(--amber); }
+.badge.high { background: #fbe4e1; color: var(--red); }
+.badge.unknown { background: var(--light); color: var(--grey); }
+
+.flag {
+  border-left: 4px solid var(--amber);
+  background: var(--light);
+  padding: 10px 14px;
+  font-size: 13px;
+  margin: 12px 0;
+}
+.flag.red { border-color: var(--red); }
+.flag.green { border-color: var(--green); }
+
+form { display: flex; flex-direction: column; gap: 10px; max-width: 480px; }
+label { font-size: 13px; font-weight: 600; color: var(--grey); }
+input, textarea, select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+}
+textarea { min-height: 80px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+
+.muted { color: var(--grey); font-size: 13px; }
+.error { color: var(--red); font-size: 13px; }
