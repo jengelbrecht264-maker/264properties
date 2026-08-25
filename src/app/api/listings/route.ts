@@ -2,12 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { Town } from "@/generated/prisma/client";
 
-/**
- * Public buy/sell search — no auth required. Returns ONLY public listing
- * fields. Never add owner PII to this query — that's the entire point of
- * the OwnerRecord separation in schema.prisma. See /api/owner-records for
- * the gated path.
- */
 export async function GET(req: NextRequest) {
   const town = req.nextUrl.searchParams.get("town") as Town | null;
   const minPrice = req.nextUrl.searchParams.get("minPrice");
@@ -45,7 +39,6 @@ export async function GET(req: NextRequest) {
       lastSoldPrice: true,
       lastSoldDate: true,
       createdAt: true,
-      // ownerRefId intentionally excluded — public route.
     },
     orderBy: { createdAt: "desc" },
     take: 50,
