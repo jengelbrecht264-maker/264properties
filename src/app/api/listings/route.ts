@@ -1,29 +1,41 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { deedsDataProvider } from "@/lib/data-providers/deeds/MockDeedsProvider";
-import { crimeDataProvider } from "@/lib/data-providers/crime/ManualOverrideCrimeProvider";
-import { schoolsProvider } from "@/lib/data-providers/schools/SeedSchoolsProvider";
+import type { Town } from "@/generated/prisma/client";
 
 /**
- * Public property profile page data. Deliberately selects the same
- * PII-free field set as /api/listings, plus enrichment (deed history,
- * crime tier, nearby schools) sourced through the pluggable providers.
- * Every enrichment field carries its own "isMockData"/"source" so the
- * frontend can (and must) show the user it's not launch-grade yet — see
- * spec Section 2's per-feature feasibility ratings.
+ * Public buy/sell search — no auth required. Returns ONLY public listing
+ * fields. Never add owner PII to this query — that's the entire point of
+ * the OwnerRecord separation in schema.prisma. See /api/owner-records for
+ * the gated path.
  */
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export async function GET(req: NextRequest) {
+  const town = req.nextUrl.searchParams.get("town") as Town | null;
+  const minPrice = req.nextUrl.searchParams.get("minPrice");
+  const maxPrice = req.nextUrl.searchParams.get("maxPrice");
+  const propertyType = req.nextUrl.searchParams.get("propertyType");
+  const bedrooms = req.nextUrl.searchParams.get("bedrooms");
 
-  const property = await prisma.property.findUnique({
-    where: { id },
+  const properties = await prisma.property.findMany({
+    where: {
+      listingType: { in: ["FOR_SALE", "FOR_RENT"] },
+      ...(town ? { town } : {}),
+      ...(propertyType ? { propertyType } : {}),
+      ...(bedrooms ? { bedrooms: Number(bedrooms) } : {}),
+      ...(minPrice || maxPrice
+        ? {
+            askingPrice: {
+              ...(minPrice ? { gte: Number(minPrice) } : {}),
+              ...(maxPrice ? { lte: Number(maxPrice) } : {}),
+            },
+          }
+        : {}),
+    },
     select: {
       id: true,
       listingType: true,
       town: true,
       suburb: true,
       addressLine: true,
-      description: true,
       propertyType: true,
       bedrooms: true,
       bathrooms: true,
@@ -33,34 +45,11 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
       lastSoldPrice: true,
       lastSoldDate: true,
       createdAt: true,
+      // ownerRefId intentionally excluded — public route.
     },
+    orderBy: { createdAt: "desc" },
+    take: 50,
   });
-  if (!property) {
-    return NextResponse.json({ error: "Property not found" }, { status: 404 });
-  }
 
-  const [deedHistory, crimeTier] = await Promise.all([
-    deedsDataProvider.getTransactionHistory(property.addressLine, property.town),
-    crimeDataProvider.getTierForSuburb(property.town, property.suburb),
-  ]);
-
-  // Schools need lat/lng — the seed data attaches an illustrative point per
-  // suburb rather than a geocoded address at MVP; a real build should
-  // geocode addressLine properly (Section 2 flags this as needing real
-  // OSM/HOTOSM data regardless).
-  const suburbAnchor = await prisma.school.findFirst({ where: { town: property.town } });
-  const nearbySchools = suburbAnchor
-    ? await schoolsProvider.findNearby({
-        town: property.town,
-        lat: suburbAnchor.lat,
-        lng: suburbAnchor.lng,
-      })
-    : [];
-
-  return NextResponse.json({
-    property,
-    deedHistory, // MockDeedsProvider — every record has isMockData: true until Section 2.1 is resolved
-    crimeTier, // UNKNOWN unless an admin has entered a sourced CrimeTierOverride
-    nearbySchools, // from seed sample data — replace with a real HOTOSM import before launch
-  });
+  return NextResponse.json({ properties });
 }
