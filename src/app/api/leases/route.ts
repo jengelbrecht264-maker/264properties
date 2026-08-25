@@ -1,34 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireRole } from "@/lib/auth";
 import { toErrorResponse } from "@/lib/apiError";
-import { generateLeasePdf, type LeaseFields } from "@/lib/pdf/leaseTemplate";
+import type { LeaseFields } from "@/lib/pdf/leaseTemplate";
 
-/**
- * Generates (or re-generates) the lease PDF from its current field
- * snapshot and streams it back. In production, swap the direct byte
- * response for uploading to Supabase Storage and updating `lease.pdfPath`,
- * then redirect to a signed URL — kept simple here so the scaffold has no
- * Storage-bucket setup dependency to run this one route.
- */
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+const leaseFieldsSchema = z.object({
+  landlordName: z.string().min(1),
+  landlordAddress: z.string().min(1),
+  tenantName: z.string().min(1),
+  tenantAddress: z.string().min(1),
+  propertyDescription: z.string().min(1),
+  rentAmount: z.number().int().positive(),
+  rentEscalationPct: z.number().nonnegative().nullable(),
+  additionalCosts: z.string(),
+  paymentFrequency: z.string().min(1),
+  depositAmount: z.number().int().nonnegative(),
+  leaseStartDate: z.string().min(1),
+  leaseEndDate: z.string().min(1),
+  conditionNotes: z.string(),
+  maintenanceSplit: z.string(),
+  restorationObligations: z.string(),
+  terminationNoticeDays: z.number().int().positive().default(90),
+  usageRules: z.string(),
+  sublettingAllowed: z.enum(["allowed", "not_allowed", "landlord_consent_required"]),
+  furnitureAddendum: z.string().nullable(),
+});
+
+const createLeaseSchema = z.object({
+  tenancyId: z.string().uuid(),
+  fields: leaseFieldsSchema,
+});
+
+export async function POST(req: NextRequest) {
   try {
-    await requireRole("LANDLORD", "TENANT", "ADMIN");
+    const profile = await requireRole("LANDLORD", "ADMIN");
+    const body = createLeaseSchema.parse(await req.json());
 
-    const lease = await prisma.lease.findUnique({
-      where: { id: (await params).id },
-      include: { tenancy: { include: { unit: { include: { property: true } } } } },
+    const tenancy = await prisma.tenancy.findUnique({
+      where: { id: body.tenancyId },
+      include: { unit: { include: { property: true } } },
     });
-    if (!lease) throw new Error("Lease not found");
+    if (!tenancy) throw new Error("Tenancy not found");
+    if (profile.role !== "ADMIN" && tenancy.unit.property.landlordId !== profile.id) {
+      throw new Error("You do not manage this tenancy");
+    }
 
-    const pdfBytes = await generateLeasePdf(lease.fields as unknown as LeaseFields);
+    const fields: LeaseFields = body.fields;
 
-    return new NextResponse(Buffer.from(pdfBytes), {
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="lease-${lease.id}.pdf"`,
-      },
+    const lease = await prisma.lease.upsert({
+      where: { tenancyId: body.tenancyId },
+      update: { fields, status: "DRAFT", version: { increment: 1 } },
+      create: { tenancyId: body.tenancyId, fields, status: "DRAFT" },
     });
+
+    return NextResponse.json({ lease }, { status: 201 });
   } catch (err) {
     return toErrorResponse(err);
   }
