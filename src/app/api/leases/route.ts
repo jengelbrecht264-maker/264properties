@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireRole } from "@/lib/auth";
 import { toErrorResponse } from "@/lib/apiError";
-import type { LeaseFields } from "@/lib/pdf/leaseTemplate";
+import type { Prisma } from "@/generated/prisma/client";
 
 const leaseFieldsSchema = z.object({
   landlordName: z.string().min(1),
@@ -32,6 +32,12 @@ const createLeaseSchema = z.object({
   fields: leaseFieldsSchema,
 });
 
+/**
+ * Creates a DRAFT lease from a template-field snapshot — spec Section 4.2:
+ * template-based only, never free-text generation. Generating the actual
+ * PDF happens on GET /api/leases/[id]/pdf, and signing on
+ * POST /api/leases/[id]/sign.
+ */
 export async function POST(req: NextRequest) {
   try {
     const profile = await requireRole("LANDLORD", "ADMIN");
@@ -46,7 +52,11 @@ export async function POST(req: NextRequest) {
       throw new Error("You do not manage this tenancy");
     }
 
-    const fields: LeaseFields = body.fields;
+    // Prisma's generated types for a `Json` column require an index
+    // signature, which the LeaseFields interface doesn't have even though
+    // its shape is fully compatible at runtime. This cast is safe --
+    // leaseFieldsSchema.parse() above already validated the actual shape.
+    const fields = body.fields as unknown as Prisma.InputJsonValue;
 
     const lease = await prisma.lease.upsert({
       where: { tenancyId: body.tenancyId },
