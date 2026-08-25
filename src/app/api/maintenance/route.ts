@@ -4,53 +4,71 @@ import { prisma } from "@/lib/prisma";
 import { requireRole } from "@/lib/auth";
 import { toErrorResponse } from "@/lib/apiError";
 
-const updateSchema = z.object({
-  status: z.enum(["NEW", "IN_PROGRESS", "RESOLVED"]).optional(),
-  note: z.string().min(1).optional(),
+const createRequestSchema = z.object({
+  tenancyId: z.string().uuid(),
+  category: z.string().min(1),
+  description: z.string().min(1),
+  photoUrls: z.array(z.string()).default([]),
+  urgency: z.enum(["LOW", "MEDIUM", "HIGH", "EMERGENCY"]).default("MEDIUM"),
 });
 
-/** Landlord updates ticket status and/or adds an internal note. */
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+/** Tenant submits a maintenance request against their own active tenancy. */
+export async function POST(req: NextRequest) {
   try {
-    const profile = await requireRole("LANDLORD", "ADMIN");
-    const { id } = await params;
-    const body = updateSchema.parse(await req.json());
+    const profile = await requireRole("TENANT");
+    const body = createRequestSchema.parse(await req.json());
 
-    const existing = await prisma.maintenanceRequest.findUnique({
-      where: { id },
+    const tenancy = await prisma.tenancy.findUnique({
+      where: { id: body.tenancyId },
       include: { unit: { include: { property: true } } },
     });
-    if (!existing) throw new Error("Maintenance request not found");
-    if (profile.role !== "ADMIN" && existing.unit.property.landlordId !== profile.id) {
-      throw new Error("You do not manage this property");
+    if (!tenancy || tenancy.tenantId !== profile.id) {
+      throw new Error("You do not have an active tenancy matching this request.");
     }
 
-    if (body.status) {
-      await prisma.maintenanceRequest.update({ where: { id }, data: { status: body.status } });
+    const request = await prisma.maintenanceRequest.create({
+      data: { ...body, unitId: tenancy.unitId },
+    });
 
-      const tenancy = await prisma.tenancy.findUnique({ where: { id: existing.tenancyId } });
-      if (tenancy) {
-        await prisma.notification.create({
-          data: {
-            userId: tenancy.tenantId,
-            type: "MAINTENANCE_UPDATE",
-            payload: { maintenanceRequestId: id, status: body.status },
-          },
-        });
-      }
-    }
-
-    if (body.note) {
-      await prisma.maintenanceNote.create({
-        data: { maintenanceRequestId: id, authorId: profile.id, body: body.note },
+    const landlordId = tenancy.unit.property.landlordId;
+    if (landlordId) {
+      await prisma.notification.create({
+        data: {
+          userId: landlordId,
+          type: "MAINTENANCE_UPDATE",
+          payload: { maintenanceRequestId: request.id, status: "NEW" },
+        },
       });
     }
 
-    const updated = await prisma.maintenanceRequest.findUnique({
-      where: { id },
-      include: { notes: true },
-    });
-    return NextResponse.json({ request: updated });
+    return NextResponse.json({ request }, { status: 201 });
+  } catch (err) {
+    return toErrorResponse(err);
+  }
+}
+
+/** Landlord sees requests across their properties; tenant sees their own. */
+export async function GET() {
+  try {
+    const profile = await requireRole("LANDLORD", "TENANT", "ADMIN");
+
+    const requests =
+      profile.role === "TENANT"
+        ? await prisma.maintenanceRequest.findMany({
+            where: { tenancy: { tenantId: profile.id } },
+            include: { notes: true },
+            orderBy: { createdAt: "desc" },
+          })
+        : await prisma.maintenanceRequest.findMany({
+            where:
+              profile.role === "ADMIN"
+                ? {}
+                : { unit: { property: { landlordId: profile.id } } },
+            include: { notes: true, tenancy: { include: { tenant: true } } },
+            orderBy: { createdAt: "desc" },
+          });
+
+    return NextResponse.json({ requests });
   } catch (err) {
     return toErrorResponse(err);
   }
