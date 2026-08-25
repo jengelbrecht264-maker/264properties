@@ -12,7 +12,6 @@ const createRequestSchema = z.object({
   urgency: z.enum(["LOW", "MEDIUM", "HIGH", "EMERGENCY"]).default("MEDIUM"),
 });
 
-/** Tenant submits a maintenance request against their own active tenancy. */
 export async function POST(req: NextRequest) {
   try {
     const profile = await requireRole("TENANT");
@@ -47,7 +46,6 @@ export async function POST(req: NextRequest) {
   }
 }
 
-/** Landlord sees requests across their properties; tenant sees their own. */
 export async function GET() {
   try {
     const profile = await requireRole("LANDLORD", "TENANT", "ADMIN");
