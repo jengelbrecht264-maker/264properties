@@ -4,54 +4,48 @@ import { prisma } from "@/lib/prisma";
 import { requireRole } from "@/lib/auth";
 import { toErrorResponse } from "@/lib/apiError";
 
-const updatePropertySchema = z.object({
-  description: z.string().min(1).optional(),
+const createPropertySchema = z.object({
+  listingType: z.enum(["FOR_SALE", "FOR_RENT", "MANAGED_RENTAL"]),
+  town: z.enum(["WINDHOEK", "SWAKOPMUND", "WALVIS_BAY"]),
+  suburb: z.string().min(1),
+  addressLine: z.string().min(1),
+  description: z.string().min(1),
+  propertyType: z.string().min(1),
+  bedrooms: z.number().int().nonnegative().nullable().optional(),
+  bathrooms: z.number().int().nonnegative().nullable().optional(),
+  sizeSqm: z.number().int().positive().nullable().optional(),
   askingPrice: z.number().int().positive().nullable().optional(),
-  images: z.array(z.string()).optional(),
+  images: z.array(z.string()).default([]),
 });
 
-async function assertOwnsProperty(propertyId: string, landlordId: string, isAdmin: boolean) {
-  const property = await prisma.property.findUnique({ where: { id: propertyId } });
-  if (!property) throw new Error("Property not found");
-  if (!isAdmin && property.landlordId !== landlordId) {
-    throw new Error("You do not own this property");
-  }
-  return property;
-}
-
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+/**
+ * Landlord's own properties (dashboard) — a landlord only ever sees their
+ * own. For the public buy/sell search, use /api/listings instead, which is
+ * intentionally a separate route with a different (public) access model.
+ */
+export async function GET() {
   try {
-    const { id } = await params;
     const profile = await requireRole("LANDLORD", "ADMIN");
-    const property = await assertOwnsProperty(id, profile.id, profile.role === "ADMIN");
-    const units = await prisma.unit.findMany({ where: { propertyId: id } });
-    return NextResponse.json({ property, units });
+    const properties = await prisma.property.findMany({
+      where: profile.role === "ADMIN" ? {} : { landlordId: profile.id },
+      include: { units: true },
+      orderBy: { createdAt: "desc" },
+    });
+    return NextResponse.json({ properties });
   } catch (err) {
     return toErrorResponse(err);
   }
 }
 
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: NextRequest) {
   try {
-    const { id } = await params;
     const profile = await requireRole("LANDLORD", "ADMIN");
-    await assertOwnsProperty(id, profile.id, profile.role === "ADMIN");
-    const body = updatePropertySchema.parse(await req.json());
+    const body = createPropertySchema.parse(await req.json());
 
-    const property = await prisma.property.update({ where: { id }, data: body });
-    return NextResponse.json({ property });
-  } catch (err) {
-    return toErrorResponse(err);
-  }
-}
-
-export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  try {
-    const { id } = await params;
-    const profile = await requireRole("LANDLORD", "ADMIN");
-    await assertOwnsProperty(id, profile.id, profile.role === "ADMIN");
-    await prisma.property.delete({ where: { id } });
-    return NextResponse.json({ success: true });
+    const property = await prisma.property.create({
+      data: { ...body, landlordId: profile.id },
+    });
+    return NextResponse.json({ property }, { status: 201 });
   } catch (err) {
     return toErrorResponse(err);
   }
