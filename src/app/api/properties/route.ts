@@ -18,11 +18,6 @@ const createPropertySchema = z.object({
   images: z.array(z.string()).default([]),
 });
 
-/**
- * Landlord's own properties (dashboard) — a landlord only ever sees their
- * own. For the public buy/sell search, use /api/listings instead, which is
- * intentionally a separate route with a different (public) access model.
- */
 export async function GET() {
   try {
     const profile = await requireRole("LANDLORD", "ADMIN");
