@@ -1,35 +1,29 @@
-import { redirect } from "next/navigation";
+import type { Metadata } from "next";
+import "./globals.css";
 import Link from "next/link";
-import { getCurrentProfile } from "@/lib/auth";
 
-export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const profile = await getCurrentProfile();
-  if (!profile) redirect("/login");
+export const metadata: Metadata = {
+  title: "264 Properties — Namibia Property Platform (MVP scaffold)",
+  description: "Tenant/landlord management + buy/sell property intelligence for Namibia.",
+};
 
-  const base = profile.role === "TENANT" ? "/dashboard/tenant" : "/dashboard/landlord";
-
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div>
-      <div className="flag">
-        Signed in as <strong>{profile.fullName}</strong> ({profile.role})
-      </div>
-      <div style={{ display: "flex", gap: 24 }}>
-        <aside style={{ width: 160, flexShrink: 0 }}>
-          <nav style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <Link href={base}>Overview</Link>
-            {profile.role === "LANDLORD" && (
-              <>
-                <Link href="/dashboard/landlord/properties/new">Add property</Link>
-                <Link href="/dashboard/landlord/maintenance">Maintenance</Link>
-              </>
-            )}
-            {profile.role === "TENANT" && (
-              <Link href="/dashboard/tenant/maintenance/new">Report an issue</Link>
-            )}
-          </nav>
-        </aside>
-        <div style={{ flex: 1 }}>{children}</div>
-      </div>
-    </div>
+    <html lang="en">
+      <body>
+        <nav className="nav">
+          <Link href="/" className="brand">264 Properties</Link>
+          <div>
+            <Link href="/listings">Buy/Sell</Link>
+            <Link href="/estimator">Estimator</Link>
+            <Link href="/dashboard">Dashboard</Link>
+            <Link href="/login">Log in</Link>
+          </div>
+        </nav>
+        <main className="container" style={{ paddingTop: 24, paddingBottom: 60 }}>
+          {children}
+        </main>
+      </body>
+    </html>
   );
 }
